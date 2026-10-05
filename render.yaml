@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: kotakscanner
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: KOTAK_CONSUMER_KEY
+        sync: false
+      - key: KOTAK_MOBILE
+        sync: false
+      - key: KOTAK_UCC
+        sync: false
+      - key: KOTAK_MPIN
+        sync: false
+      - key: KOTAK_TOTP_SECRET
+        sync: false
