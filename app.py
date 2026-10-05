@@ -17,7 +17,7 @@ except ImportError:
     WsToken = None
     SFeedScrip = None
 
-app = FastAPI(title="KotakScanner", version="0.1.0")
+app = FastAPI(title="KotakScanner", version="0.2.0")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 INTERVAL_MINUTES = {"1min":1,"3min":3,"5min":5,"10min":10,"15min":15,"30min":30,"60min":60}
 
@@ -73,11 +73,42 @@ def live_client():
     client.totp_validate(mpin=os.environ["KOTAK_MPIN"])
     return client
 
+def normalize_search_results(response):
+    data=response.get("data",response) if isinstance(response,dict) else response
+    if isinstance(data,dict):
+        for key in ("scrips","results","data"):
+            if isinstance(data.get(key),list):
+                data=data[key]; break
+    if not isinstance(data,list): return []
+    out=[]
+    for row in data:
+        if not isinstance(row,dict): continue
+        symbol=row.get("display_symbol") or row.get("symbol") or row.get("trading_symbol") or row.get("pSymbol")
+        token=row.get("instrument_token") or row.get("token") or row.get("pSymbol")
+        if symbol and token:
+            out.append({
+                "symbol":str(symbol),
+                "token":str(token),
+                "segment":str(row.get("exchange_segment") or row.get("exchange") or "nse_cm")
+            })
+    return out[:30]
+
 @app.get("/",response_class=HTMLResponse)
 async def home(request:Request): return templates.TemplateResponse("index.html",{"request":request})
 
 @app.get("/health")
-async def health(): return {"ok":True,"service":"KotakScanner"}
+async def health(): return {"ok":True,"service":"KotakScanner","version":"0.2.0"}
+
+@app.get("/api/search")
+async def search(symbol:str=Query(...,min_length=1,max_length=40),segment:str=Query("nse_cm")):
+    if segment not in {"nse_cm","bse_cm"}: return {"ok":False,"error":"Only NSE CM and BSE CM search is supported"}
+    try:
+        client=history_client()
+        response=client.search_scrip(exchange_segment=segment,symbol=symbol.strip().upper())
+        results=normalize_search_results(response)
+        return {"ok":True,"results":results}
+    except Exception as e:
+        return {"ok":False,"error":str(e)}
 
 @app.get("/api/history")
 async def history(segment:str=Query("nse_cm"),token:str=Query(...,min_length=1),interval:str=Query("5min"),days:int=Query(1,ge=1,le=30)):
