@@ -1,0 +1,20 @@
+name: NIFTY 5m V2 backtest
+on:
+  push:
+    branches: [backtest-nifty-5m-20261006]
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas numpy yfinance
+      - run: python backtest_nifty_5m_v2.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nifty-5m-v2-backtest
+          path: |
+            nifty_5m_v2_backtest.json
+            nifty_5m_v2_trades.csv
