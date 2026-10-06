@@ -1,6 +1,6 @@
 import os
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
@@ -18,7 +18,7 @@ except ImportError:
     SFeedScrip = None
     SFeedIndex = None
 
-app = FastAPI(title="KotakScanner", version="0.4.0")
+app = FastAPI(title="KotakScanner", version="0.5.0")
 INDEXES = {"NIFTY 50": ("nse_cm", "Nifty 50"), "SENSEX": ("bse_cm", "SENSEX")}
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 INTERVAL_MINUTES = {"1min":1,"3min":3,"5min":5,"10min":10,"15min":15,"30min":30,"60min":60}
@@ -146,7 +146,20 @@ def normalize_search_results(response):
 async def home(request:Request): return templates.TemplateResponse("index.html",{"request":request})
 
 @app.get("/health")
-async def health(): return {"ok":True,"service":"KotakScanner","version":"0.4.0"}
+async def health(): return {"ok":True,"service":"KotakScanner","version":"0.5.0"}
+
+@app.get("/api/expiry-options")
+async def expiry_options(index:str=Query("NIFTY 50"), expiry:str|None=None):
+    try: return {"ok":True, **expiry_scanner(index, expiry=expiry)}
+    except Exception as e: return {"ok":False,"error":str(e)}
+
+@app.get("/api/snapshot-1515")
+async def snapshot_1515_api():
+    now=datetime.now().astimezone()
+    if now.hour>15 or (now.hour==15 and now.minute>=15):
+        try: return {"ok":True,"captured":True,"snapshot":capture_1515()}
+        except Exception as e: return {"ok":False,"error":str(e)}
+    return {"ok":True,"captured":False,"message":"3:15 PM IST snapshot is not available yet today.","now":now.isoformat()}
 
 @app.get("/api/search")
 async def search(symbol:str=Query(...,min_length=1,max_length=40),segment:str=Query("nse_cm")):
