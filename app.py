@@ -1,6 +1,7 @@
 import os
 from collections import deque
 from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
@@ -155,7 +156,7 @@ async def expiry_options(index:str=Query("NIFTY 50"), expiry:str|None=None):
 
 @app.get("/api/snapshot-1515")
 async def snapshot_1515_api():
-    now=datetime.now().astimezone()
+    now=datetime.now(IST)
     if now.hour>15 or (now.hour==15 and now.minute>=15):
         try: return {"ok":True,"captured":True,"snapshot":capture_1515()}
         except Exception as e: return {"ok":False,"error":str(e)}
