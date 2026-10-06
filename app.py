@@ -11,13 +11,15 @@ from fastapi.templating import Jinja2Templates
 load_dotenv()
 try:
     from neo_api_client import NeoAPI
-    from neo_api_client.websocket.feed import WsToken, SFeedScrip
+    from neo_api_client.websocket.feed import WsToken, SFeedScrip, SFeedIndex
 except ImportError:
     NeoAPI = None
     WsToken = None
     SFeedScrip = None
+    SFeedIndex = None
 
-app = FastAPI(title="KotakScanner", version="0.3.0")
+app = FastAPI(title="KotakScanner", version="0.4.0")
+INDEXES = {"NIFTY 50": ("nse_cm", "Nifty 50"), "SENSEX": ("bse_cm", "SENSEX")}
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 INTERVAL_MINUTES = {"1min":1,"3min":3,"5min":5,"10min":10,"15min":15,"30min":30,"60min":60}
 
@@ -40,7 +42,7 @@ def candle_pattern(c):
         if ac>ao and br<=brange*.35 and cl<o and cl<=(ao+ac)/2: return "Evening Star"
     return None
 
-def market_signal(candles):
+def market_signal(candles, is_index=False):
     """Use up to the latest 50 candles for context; return an explainable directional indication."""
     if len(candles) < 20:
         return {"direction":"NEUTRAL","confidence":0,"score":0,"pattern":None,"reason":"Need at least 20 candles for market context"}
@@ -75,7 +77,7 @@ def market_signal(candles):
     elif rsi>70: score-=5; reasons.append("RSI overbought")
     elif rsi<30: score+=5; reasons.append("RSI oversold")
     # Volume confirmation when usable.
-    if sum(volumes[-10:])>0 and sum(volumes[-20:])>0:
+    if not is_index and sum(volumes[-10:])>0 and sum(volumes[-20:])>0:
         avg_vol=sum(volumes[-20:])/20
         if volumes[-1]>avg_vol*1.2:
             score += 8 if closes[-1]>=closes[-2] else -8
@@ -104,7 +106,9 @@ def extract_price(message):
     price=getattr(message,"last_traded_price",None); volume=getattr(message,"volume_traded_today",None)
     if price is None and hasattr(message,"model_dump"):
         d=message.model_dump(); price=d.get("last_traded_price") or d.get("ltp"); volume=d.get("volume_traded_today") or d.get("volume")
-    if price is None: raise ValueError("Kotak feed message did not contain LTP")
+    if price is None and hasattr(message, "model_dump"):
+        d=message.model_dump(); price=d.get("iv") or d.get("last_traded_price") or d.get("ltp"); volume=d.get("volume_traded_today") or d.get("volume")
+    if price is None: raise ValueError("Kotak feed message did not contain index LTP")
     return float(price),float(volume or 0)
 
 def history_client():
@@ -142,11 +146,13 @@ def normalize_search_results(response):
 async def home(request:Request): return templates.TemplateResponse("index.html",{"request":request})
 
 @app.get("/health")
-async def health(): return {"ok":True,"service":"KotakScanner","version":"0.3.0"}
+async def health(): return {"ok":True,"service":"KotakScanner","version":"0.4.0"}
 
 @app.get("/api/search")
 async def search(symbol:str=Query(...,min_length=1,max_length=40),segment:str=Query("nse_cm")):
-    if segment not in {"nse_cm","bse_cm"}: return {"ok":False,"error":"Only NSE CM and BSE CM search is supported"}
+    if segment not in {"nse_cm","bse_cm"}: return {"ok":False,"error":"Unsupported segment"}
+    if segment=="nse_cm" and symbol.strip().upper() in {"NIFTY 50","NIFTY"}: return {"ok":True,"results":[{"symbol":"Nifty 50","token":"Nifty 50","segment":"nse_cm","is_index":True}]}
+    if segment=="bse_cm" and symbol.strip().upper()=="SENSEX": return {"ok":True,"results":[{"symbol":"SENSEX","token":"SENSEX","segment":"bse_cm","is_index":True}]}
     try:
         client=history_client(); response=client.search_scrip(exchange_segment=segment,symbol=symbol.strip().upper())
         return {"ok":True,"results":normalize_search_results(response)}
@@ -160,7 +166,8 @@ async def history(segment:str=Query("nse_cm"),token:str=Query(...,min_length=1),
         response=client.historical_data(neosymbol=f"{segment}|{token}",interval=interval,from_date=start.strftime("%Y-%m-%d"),to_date=end.strftime("%Y-%m-%d"))
         rows=response.get("data",{}).get("candles",[])
         candles=[{"time":r[0],"open":r[1],"high":r[2],"low":r[3],"close":r[4],"volume":r[5] if len(r)>5 else 0,"forming":False} for r in rows]
-        return {"ok":True,"candles":candles,"pattern":candle_pattern(candles),"signal":market_signal(candles)}
+        is_index=(segment,token) in INDEXES.values()
+        return {"ok":True,"candles":candles,"pattern":candle_pattern(candles),"signal":market_signal(candles,is_index=is_index)}
     except Exception as e: return {"ok":False,"error":str(e)}
 
 @app.websocket("/ws")
@@ -174,14 +181,15 @@ async def stream(websocket:WebSocket):
         hist=client.historical_data(neosymbol=f"{segment}|{token}",interval=interval,from_date=start.strftime("%Y-%m-%d"),to_date=end.strftime("%Y-%m-%d"))
         for r in hist.get("data",{}).get("candles",[])[-499:]:
             candles.append({"time":r[0],"open":r[1],"high":r[2],"low":r[3],"close":r[4],"volume":r[5] if len(r)>5 else 0,"forming":False})
-        await websocket.send_json({"type":"snapshot","candles":list(candles),"pattern":candle_pattern(list(candles)),"signal":market_signal(list(candles))})
+        is_index=(segment,token) in INDEXES.values()
+        await websocket.send_json({"type":"snapshot","candles":list(candles),"pattern":candle_pattern(list(candles)),"signal":market_signal(list(candles),is_index=is_index),"instrument_type":"index" if is_index else "stock"})
         async with client.create_websocket() as ws:
             await ws.subscribe_scrips([WsToken(segment,token)])
             async for message in ws:
-                if SFeedScrip is not None and not isinstance(message,SFeedScrip): continue
+                if SFeedScrip is not None and SFeedIndex is not None and not isinstance(message,(SFeedScrip,SFeedIndex)): continue
                 price,volume=extract_price(message); now=datetime.now().astimezone()
                 apply_tick(candles,{"timestamp":now,"price":price,"volume":volume},INTERVAL_MINUTES[interval]); current=list(candles)
-                await websocket.send_json({"type":"tick","price":price,"candles":current[-200:],"pattern":candle_pattern(current),"signal":market_signal(current),"status":"FORMING","updated_at":now.isoformat()})
+                await websocket.send_json({"type":"tick","price":price,"candles":current[-200:],"pattern":candle_pattern(current),"signal":market_signal(current,is_index=is_index),"status":"FORMING","updated_at":now.isoformat()})
     except WebSocketDisconnect: pass
     except Exception as e:
         try: await websocket.send_json({"type":"error","message":str(e)})
