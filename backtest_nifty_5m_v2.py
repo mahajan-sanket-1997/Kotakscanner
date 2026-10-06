@@ -31,6 +31,8 @@ typ=(h+l+c)/3; sess=df.index.date
 df["vwap"]=(typ*df.volume.fillna(0)).groupby(sess).cumsum()/df.volume.fillna(0).groupby(sess).cumsum().replace(0,np.nan)
 df["atr_pct"]=df.atr/c*100
 df["atr_pct_q"]=df.atr_pct.shift(1).rolling(100).quantile(.75)
+df["high_20"]=h.shift(1).rolling(20).max()
+df["low_20"]=l.shift(1).rolling(20).min()
 
 # V2: regime-aware weighted ensemble.
 def signal(r):
@@ -47,15 +49,12 @@ def signal(r):
     if r.adx>=20: s += 10 if r.ema21>r.ema50 else -10
     if pd.notna(r.high_20) and r.close>r.high_20: s+=10
     if pd.notna(r.low_20) and r.close<r.low_20: s-=10
-    # High-volatility regime: require stronger agreement rather than forcing direction.
     if pd.notna(r.atr_pct_q) and r.atr_pct>r.atr_pct_q and abs(s)<55: return 0
     return 1 if s>=50 else -1 if s<=-50 else 0
 
 df["signal"]=df.apply(signal,axis=1)
 td=df[df.index.date>=pd.Timestamp("2026-09-07").date()].copy()
 
-# Entry next bar open; exit on opposite signal or ATR stop/target, whichever occurs first.
-# 1.2 ATR stop, 1.8 ATR target; hard EOD exit.
 trades=[]; pos=0; ep=et=score_at_entry=None; stop=target=None
 for i in range(len(td)-1):
     r=td.iloc[i]; nxt=td.iloc[i+1]; ts=r.name
@@ -64,7 +63,6 @@ for i in range(len(td)-1):
         stop=ep-pos*1.2*a; target=ep+pos*1.8*a; score_at_entry=float(r.adx); continue
     if pos:
         exit_price=None; exit_ts=None
-        # Conservative same-bar rule: if both target and stop touch, assume stop first.
         if pos==1 and r.low<=stop: exit_price=stop; exit_ts=ts
         elif pos==-1 and r.high>=stop: exit_price=stop; exit_ts=ts
         elif pos==1 and r.high>=target: exit_price=target; exit_ts=ts
