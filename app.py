@@ -2,6 +2,8 @@ import os
 from collections import deque
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
@@ -142,6 +144,82 @@ def normalize_search_results(response):
         token=row.get("instrument_token") or row.get("token") or row.get("pSymbol")
         if symbol and token: out.append({"symbol":str(symbol),"token":str(token),"segment":str(row.get("exchange_segment") or row.get("exchange") or "nse_cm")})
     return out[:30]
+
+
+OPTION_UNDERLYINGS = {"NIFTY 50": "NIFTY", "SENSEX": "SENSEX"}
+snapshot_1515 = {"captured": False, "date": None, "data": None}
+
+def _num(value):
+    try: return float(value or 0)
+    except Exception: return 0.0
+
+def _option_rows(response):
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    if not isinstance(data, dict): return []
+    rows = []
+    for key, side in (("call", "CE"), ("put", "PE")):
+        for row in data.get(key, []) or []:
+            inst = row.get("instrument") or {}
+            quote = row.get("quote") or {}
+            oi = row.get("openInterest") or {}
+            rows.append({"side":side,"symbol":inst.get("symbol"),"neo_symbol":inst.get("neoSymbol"),
+                         "strike":_num(inst.get("strikePrice")),"moneyness":inst.get("moneyness"),
+                         "ltp":_num(quote.get("ltp")),"volume":_num(quote.get("volume")),
+                         "oi":_num(oi.get("current")),"oi_change":_num(oi.get("change")),
+                         "oi_change_pct":_num(oi.get("changePct"))})
+    return rows
+
+def _scanner_score(row, max_volume):
+    return round(min(abs(row["oi_change_pct"])/10.0,10.0)+(row["volume"]/max(max_volume,1.0))*10.0+max(0.0,3.0-min(row["ltp"],3.0)),2)
+
+def get_expiries(index_name):
+    if index_name not in OPTION_UNDERLYINGS: raise ValueError("Unsupported index")
+    exchange = "nse_fo" if index_name == "NIFTY 50" else "bse_fo"
+    client = history_client()
+    try:
+        response = client.expiries(exchange=exchange, underlying=OPTION_UNDERLYINGS[index_name], instrument_type="option")
+    finally:
+        try: client.logout()
+        except Exception: pass
+    expiries = response.get("expiries", []) if isinstance(response, dict) else []
+    if not expiries and isinstance(response, dict) and isinstance(response.get("data"), dict):
+        expiries = response["data"].get("expiries", [])
+    return [str(x) for x in (expiries or [])]
+
+def expiry_scanner(index_name, expiry=None, count=40):
+    if index_name not in OPTION_UNDERLYINGS: raise ValueError("Unsupported index")
+    exchange = "nse_fo" if index_name == "NIFTY 50" else "bse_fo"
+    underlying = OPTION_UNDERLYINGS[index_name]
+    expiries = get_expiries(index_name)
+    if not expiries: raise RuntimeError("No option expiries returned for "+index_name)
+    chosen = expiry if expiry in expiries else expiries[0]
+    client = history_client()
+    try:
+        chain = client.option_chain(exchange=exchange, underlying=underlying, expiry=chosen, instrument_type="option", count=count)
+    finally:
+        try: client.logout()
+        except Exception: pass
+    rows = _option_rows(chain)
+    if not rows: raise RuntimeError("Option chain returned no contracts for "+index_name)
+    max_volume = max((r["volume"] for r in rows), default=1.0)
+    for row in rows: row["score"] = _scanner_score(row,max_volume)
+    calls = sorted((r for r in rows if r["side"]=="CE"),key=lambda x:x["score"],reverse=True)[:8]
+    puts = sorted((r for r in rows if r["side"]=="PE"),key=lambda x:x["score"],reverse=True)[:8]
+    atm = next((r["strike"] for r in rows if r.get("moneyness")=="ATM"),None)
+    return {"index":index_name,"underlying":underlying,"expiry":chosen,"available_expiries":expiries[:8],
+            "atm_strike":atm,"contracts":calls+puts,"scanned":len(rows)}
+
+def capture_1515():
+    global snapshot_1515
+    now = datetime.now(IST)
+    today = now.date().isoformat()
+    if snapshot_1515["date"] == today and snapshot_1515["captured"]: return snapshot_1515["data"]
+    result = {"captured_at":now.isoformat(),"date":today,"time":"3:15 PM IST","indexes":{}}
+    for name in ("NIFTY 50","SENSEX"):
+        try: result["indexes"][name] = expiry_scanner(name)
+        except Exception as exc: result["indexes"][name] = {"error":str(exc),"contracts":[]}
+    snapshot_1515 = {"captured":True,"date":today,"data":result}
+    return result
 
 @app.get("/",response_class=HTMLResponse)
 async def home(request:Request): return templates.TemplateResponse("index.html",{"request":request})
